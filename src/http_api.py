@@ -42,6 +42,29 @@ def create_handler(service, rules, static_dir):
             self.end_headers()
             self.wfile.write(data)
 
+        def _send_static(self, name):
+            safe = os.path.basename(name)
+            path = os.path.join(static_dir, safe)
+            if not safe or not os.path.isfile(path):
+                raise NotFoundError("not found")
+            content_types = {
+                ".css": "text/css; charset=utf-8",
+                ".js": "text/javascript; charset=utf-8",
+                ".html": "text/html; charset=utf-8",
+                ".png": "image/png",
+                ".svg": "image/svg+xml",
+            }
+            content_type = content_types.get(
+                os.path.splitext(safe)[1].lower(), "application/octet-stream"
+            )
+            with open(path, "rb") as handle:
+                data = handle.read()
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
         def _actor(self):
             return Actor.from_headers(self.headers)
 
@@ -83,6 +106,22 @@ def create_handler(service, rules, static_dir):
                     index = os.path.join(static_dir, "index.html")
                     with open(index, "r", encoding="utf-8") as handle:
                         return self._send_html(200, handle.read())
+                if parts and parts[0] == "static":
+                    if len(parts) == 2:
+                        return self._send_static(parts[1])
+                    raise NotFoundError("not found")
+                if len(parts) >= 2 and parts[:2] == ["api", "sync"]:
+                    query = parse_qs(parsed.query)
+                    if parts[2:] == ["batches"]:
+                        return self._send(200, {"items": service.list_batches()})
+                    if parts[2:] == ["conflicts"]:
+                        status = query.get("status", ["pending"])[0]
+                        return self._send(200, {"items": service.list_conflicts(status=status)})
+                    if parts[2:] == ["changes"]:
+                        return self._send(
+                            200, service.sync_changes(query.get("since", ["0"])[0])
+                        )
+                    raise NotFoundError("not found")
                 if parts == ["api", "audit"]:
                     return self._send(200, {"items": service.audit_log()})
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
@@ -107,6 +146,8 @@ def create_handler(service, rules, static_dir):
                 parsed = urlparse(self.path)
                 parts = [part for part in parsed.path.split("/") if part]
                 actor = self._actor()
+                if parts == ["api", "sync", "batches"]:
+                    return self._send(200, service.submit_batch(actor, self._body()))
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     body = self._body()
                     action = body.pop("action", None)

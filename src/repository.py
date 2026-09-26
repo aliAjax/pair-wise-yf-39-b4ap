@@ -54,6 +54,40 @@ class SQLiteRepository:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(actor_id, idem_key)
                 );
+                CREATE TABLE IF NOT EXISTS sync_batches (
+                    batch_id TEXT PRIMARY KEY,
+                    actor_id TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    result TEXT NOT NULL,
+                    cursor INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS sync_conflicts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    batch_id TEXT NOT NULL,
+                    op_index INTEGER NOT NULL,
+                    op TEXT NOT NULL,
+                    entity_id TEXT,
+                    reason TEXT NOT NULL,
+                    detail TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_sync_conflicts_batch
+                    ON sync_conflicts(batch_id);
+                CREATE TABLE IF NOT EXISTS sync_log (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entity_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    batch_id TEXT,
+                    actor_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_sync_log_entity
+                    ON sync_log(entity_id, seq);
             """)
 
     @staticmethod
@@ -195,6 +229,122 @@ class SQLiteRepository:
                 "VALUES (?, ?, ?, ?)",
                 (actor_id, idem_key, entity_id, utcnow()),
             )
+
+    @staticmethod
+    def _batch_from_row(row):
+        return {
+            "batch_id": row["batch_id"],
+            "actor_id": row["actor_id"],
+            "content_hash": row["content_hash"],
+            "status": row["status"],
+            "result": json.loads(row["result"]),
+            "cursor": int(row["cursor"]),
+            "created_at": row["created_at"],
+        }
+
+    def get_batch(self, batch_id):
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM sync_batches WHERE batch_id = ?", (batch_id,)
+            ).fetchone()
+        return self._batch_from_row(row) if row else None
+
+    def save_batch(self, batch_id, actor_id, content_hash, status, result, cursor):
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO sync_batches(batch_id, actor_id, content_hash, status, result, cursor, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    batch_id,
+                    actor_id,
+                    content_hash,
+                    status,
+                    json.dumps(result, ensure_ascii=False, sort_keys=True),
+                    int(cursor),
+                    utcnow(),
+                ),
+            )
+
+    def list_batches(self):
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM sync_batches ORDER BY created_at, batch_id"
+            ).fetchall()
+        return [self._batch_from_row(row) for row in rows]
+
+    def append_conflict(self, batch_id, op_index, op, entity_id, reason, detail):
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO sync_conflicts(batch_id, op_index, op, entity_id, reason, detail, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)",
+                (
+                    batch_id,
+                    int(op_index),
+                    op,
+                    entity_id,
+                    reason,
+                    json.dumps(detail, ensure_ascii=False, sort_keys=True),
+                    utcnow(),
+                ),
+            )
+
+    def list_conflicts(self, status=None):
+        clauses = []
+        params = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM sync_conflicts" + where + " ORDER BY id", params
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "batch_id": row["batch_id"],
+                "op_index": row["op_index"],
+                "op": row["op"],
+                "entity_id": row["entity_id"],
+                "reason": row["reason"],
+                "detail": json.loads(row["detail"]),
+                "status": row["status"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    def append_sync(self, entity_id, kind, action, version, actor_id, batch_id=None):
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO sync_log(entity_id, kind, action, version, batch_id, actor_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (entity_id, kind, action, int(version), batch_id, actor_id, utcnow()),
+            )
+
+    def list_sync_changes(self, since=0):
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM sync_log WHERE seq > ? ORDER BY seq", (int(since),)
+            ).fetchall()
+        return [
+            {
+                "seq": row["seq"],
+                "entity_id": row["entity_id"],
+                "kind": row["kind"],
+                "action": row["action"],
+                "version": row["version"],
+                "batch_id": row["batch_id"],
+                "actor_id": row["actor_id"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    def sync_cursor(self):
+        with self._connect() as connection:
+            row = connection.execute("SELECT MAX(seq) AS seq FROM sync_log").fetchone()
+        return int(row["seq"]) if row and row["seq"] is not None else 0
 
     def ping(self):
         with self._connect() as connection:

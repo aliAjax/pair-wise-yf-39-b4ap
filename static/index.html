@@ -4,31 +4,120 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>野生动物疫病监测与离线同步</title>
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #1f2937; }
-    main { max-width: 820px; margin: auto; }
-    pre { background: #f3f4f6; padding: 1rem; border-radius: 8px; overflow-x: auto; }
-    button { padding: .5rem .8rem; cursor: pointer; }
-  </style>
+  <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <main>
   <h1>野生动物疫病监测与离线同步</h1>
-  <p>这是最小演示页面。使用浏览器或 curl 调用 JSON API。</p>
-  <p><button onclick="checkHealth()">检查服务状态</button></p>
-  <pre id="result">等待操作</pre>
-  <h2>常用接口</h2>
-  <pre>GET  /health
+  <p>野外终端断网改单、回网整批同步：重复批次返回首次结果，同号不同内容返回冲突，过期基础版本只登记待处理冲突。</p>
+
+  <section>
+    <h2>服务状态</h2>
+    <p>
+      <button onclick="checkHealth()">检查服务状态</button>
+      <button onclick="loadAll()">刷新批次与冲突</button>
+    </p>
+    <pre id="result">等待操作</pre>
+  </section>
+
+  <section>
+    <h2>同步批次</h2>
+    <table id="batches">
+      <thead>
+        <tr><th>批次号</th><th>状态</th><th>游标</th><th>成功/冲突/总数</th><th>提交人</th><th>时间</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <p id="batches-empty" class="empty">暂无批次</p>
+  </section>
+
+  <section>
+    <h2>待处理冲突</h2>
+    <table id="conflicts">
+      <thead>
+        <tr><th>#</th><th>批次号</th><th>实体</th><th>操作</th><th>失败原因</th><th>时间</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <p id="conflicts-empty" class="empty">暂无待处理冲突</p>
+  </section>
+
+  <section>
+    <h2>常用接口</h2>
+    <pre>GET  /health
 GET  /api/&lt;kind&gt;
 POST /api/&lt;kind&gt;
 GET  /api/entities/&lt;id&gt;
-POST /api/entities/&lt;id&gt;/actions</pre>
+POST /api/entities/&lt;id&gt;/actions
+POST /api/sync/batches
+GET  /api/sync/batches
+GET  /api/sync/conflicts
+GET  /api/sync/changes?since=&lt;cursor&gt;</pre>
+  </section>
 </main>
 <script>
 async function checkHealth() {
   const response = await fetch('/health');
   document.getElementById('result').textContent = JSON.stringify(await response.json(), null, 2);
 }
+
+function cell(row, text, className) {
+  const td = document.createElement('td');
+  if (className) {
+    const badge = document.createElement('span');
+    badge.className = className;
+    badge.textContent = text;
+    td.appendChild(badge);
+  } else {
+    td.textContent = text == null ? '' : text;
+  }
+  row.appendChild(td);
+}
+
+function renderBatches(items) {
+  const tbody = document.querySelector('#batches tbody');
+  tbody.textContent = '';
+  document.getElementById('batches-empty').style.display = items.length ? 'none' : '';
+  for (const item of items) {
+    const row = document.createElement('tr');
+    cell(row, item.batch_id);
+    cell(row, item.status, 'badge status-' + item.status);
+    cell(row, item.cursor);
+    cell(row, item.applied + ' / ' + item.conflicts + ' / ' + item.total);
+    cell(row, item.actor_id);
+    cell(row, item.created_at);
+    tbody.appendChild(row);
+  }
+}
+
+function renderConflicts(items) {
+  const tbody = document.querySelector('#conflicts tbody');
+  tbody.textContent = '';
+  document.getElementById('conflicts-empty').style.display = items.length ? 'none' : '';
+  for (const item of items) {
+    const row = document.createElement('tr');
+    cell(row, item.id);
+    cell(row, item.batch_id);
+    cell(row, item.entity_id || '-');
+    cell(row, item.op);
+    cell(row, item.reason);
+    cell(row, item.created_at);
+    tbody.appendChild(row);
+  }
+}
+
+async function loadAll() {
+  const [batches, conflicts] = await Promise.all([
+    fetch('/api/sync/batches').then(r => r.json()),
+    fetch('/api/sync/conflicts').then(r => r.json()),
+  ]);
+  renderBatches(batches.items || []);
+  renderConflicts(conflicts.items || []);
+}
+
+loadAll().catch(err => {
+  document.getElementById('result').textContent = '加载失败: ' + err;
+});
 </script>
 </body>
 </html>

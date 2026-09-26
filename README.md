@@ -34,8 +34,27 @@ python3 app.py --db ./data.db --port 8305
 - `GET /api/entities/<id>`：读取对象当前版本。
 - `POST /api/entities/<id>/actions`：提交`{"action":"动作名","data":{...},"expected_version":数字}`。
 - `GET /api/audit`：读取审计记录。
+- `POST /api/sync/batches`：提交离线批次`{"batch_id":"...","operations":[...]}`。
+- `GET /api/sync/batches`：列出已接收批次及游标。
+- `GET /api/sync/conflicts`：列出待处理冲突（`?status=`可过滤）。
+- `GET /api/sync/changes?since=<cursor>`：取回游标之后的变更。
 
 请求身份通过`X-User-Id`和`X-Role`请求头传入。创建和动作的可执行角色由规则引擎控制。
+
+## 离线批次同步
+
+野外终端断网期间的修改按批次上传，批次内每个操作形如：
+
+```json
+{"op": "create", "kind": "observation", "client_op_id": "o1", "data": {...}}
+{"op": "transition", "entity_id": "...", "action": "submit", "base_version": 1, "data": {...}}
+```
+
+- 同一`batch_id`重发且内容一致时，返回第一次的处理结果（`replayed: true`），不会重复建单。
+- 同一`batch_id`但内容不同时，返回409冲突。
+- `transition`必须携带`base_version`；版本过期的操作不会改动实体，只登记一条待处理冲突和失败原因。
+- 成功批次返回递增`cursor`，现场端用`GET /api/sync/changes?since=<cursor>`取回后续变更。
+- 批次、冲突和变更流水都写入SQLite，服务重启后仍然保留。
 
 ## 测试
 
