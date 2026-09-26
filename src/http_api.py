@@ -42,6 +42,19 @@ def create_handler(service, rules, static_dir):
             self.end_headers()
             self.wfile.write(data)
 
+        def _send_static(self, filename, content_type):
+            target = os.path.realpath(os.path.join(static_dir, filename))
+            static_root = os.path.realpath(static_dir)
+            if not target.startswith(static_root + os.sep) or not os.path.isfile(target):
+                raise NotFoundError("not found")
+            with open(target, "rb") as handle:
+                data = handle.read()
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
         def _actor(self):
             return Actor.from_headers(self.headers)
 
@@ -83,8 +96,27 @@ def create_handler(service, rules, static_dir):
                     index = os.path.join(static_dir, "index.html")
                     with open(index, "r", encoding="utf-8") as handle:
                         return self._send_html(200, handle.read())
+                if parsed.path == "/static/styles.css":
+                    return self._send_static("styles.css", "text/css; charset=utf-8")
                 if parts == ["api", "audit"]:
                     return self._send(200, {"items": service.audit_log()})
+                if parts == ["api", "batches"]:
+                    query = parse_qs(parsed.query)
+                    limit = int(query.get("limit", ["100"])[0])
+                    return self._send(200, {"items": service.list_batches(limit=limit)})
+                if parts == ["api", "conflicts"]:
+                    query = parse_qs(parsed.query)
+                    status_filter = query.get("status", [None])[0]
+                    limit = int(query.get("limit", ["100"])[0])
+                    return self._send(
+                        200,
+                        {"items": service.list_conflicts(status=status_filter, limit=limit)},
+                    )
+                if parts == ["api", "changes"]:
+                    query = parse_qs(parsed.query)
+                    cursor = int(query.get("cursor", ["0"])[0])
+                    limit = int(query.get("limit", ["200"])[0])
+                    return self._send(200, service.changes(cursor=cursor, limit=limit))
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     return self._send(200, service.get(parts[2]))
                 if len(parts) >= 2 and parts[0] == "api":
@@ -107,6 +139,12 @@ def create_handler(service, rules, static_dir):
                 parsed = urlparse(self.path)
                 parts = [part for part in parsed.path.split("/") if part]
                 actor = self._actor()
+                if parts == ["api", "batches"]:
+                    body = self._body()
+                    batch_id = body.pop("batch_id", None) or self.headers.get("Batch-Id")
+                    return self._send(
+                        200, service.submit_batch(actor, batch_id, body.get("items", []))
+                    )
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     body = self._body()
                     action = body.pop("action", None)

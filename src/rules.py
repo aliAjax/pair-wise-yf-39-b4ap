@@ -96,6 +96,13 @@ class RuleEngine:
             custom(actor, data, lookup)
         return dict(data)
 
+    def validate_patch(self, actor, kind):
+        """Offline edits that only change data and keep the current status."""
+        kind = self.normalize_kind(kind)
+        if kind not in self.INITIAL_STATUS:
+            raise ValidationError("unknown kind: " + str(kind))
+        self._ensure_role(actor, self.CREATE_ROLES.get(kind, ("admin",)))
+
     def validate_transition(self, actor, entity, action, data, lookup=None):
         kind = self.normalize_kind(entity["kind"])
         transition = self.TRANSITIONS.get(kind, {}).get(action)

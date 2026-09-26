@@ -54,6 +54,29 @@ class SQLiteRepository:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(actor_id, idem_key)
                 );
+                CREATE TABLE IF NOT EXISTS batches (
+                    batch_id TEXT PRIMARY KEY,
+                    actor_id TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    cursor INTEGER NOT NULL,
+                    result TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS conflicts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    batch_id TEXT NOT NULL,
+                    item_index INTEGER NOT NULL,
+                    entity_id TEXT,
+                    op TEXT,
+                    reason TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL,
+                    resolved_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_conflicts_status
+                    ON conflicts(status, id);
             """)
 
     @staticmethod
@@ -195,6 +218,139 @@ class SQLiteRepository:
                 "VALUES (?, ?, ?, ?)",
                 (actor_id, idem_key, entity_id, utcnow()),
             )
+
+    def get_batch(self, batch_id):
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM batches WHERE batch_id = ?", (batch_id,)
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "batch_id": row["batch_id"],
+            "actor_id": row["actor_id"],
+            "payload_hash": row["payload_hash"],
+            "status": row["status"],
+            "cursor": int(row["cursor"]),
+            "result": json.loads(row["result"]),
+            "created_at": row["created_at"],
+        }
+
+    def list_batches(self, limit=100):
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT batch_id, actor_id, status, cursor, created_at "
+                "FROM batches ORDER BY rowid DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        return [
+            {
+                "batch_id": row["batch_id"],
+                "actor_id": row["actor_id"],
+                "status": row["status"],
+                "cursor": int(row["cursor"]),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    def save_batch(self, batch_id, actor_id, payload_hash, status, cursor, result):
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO batches(batch_id, actor_id, payload_hash, status, cursor, result, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    batch_id,
+                    actor_id,
+                    payload_hash,
+                    status,
+                    cursor,
+                    json.dumps(result, ensure_ascii=False, sort_keys=True),
+                    utcnow(),
+                ),
+            )
+
+    def add_conflict(self, batch_id, item_index, entity_id, op, reason, payload):
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO conflicts(batch_id, item_index, entity_id, op, reason, payload, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    batch_id,
+                    item_index,
+                    entity_id,
+                    op,
+                    reason,
+                    json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                    utcnow(),
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def list_conflicts(self, status=None, limit=100):
+        if status:
+            sql = (
+                "SELECT * FROM conflicts WHERE status = ? ORDER BY id DESC LIMIT ?"
+            )
+            params = (status, int(limit))
+        else:
+            sql = "SELECT * FROM conflicts ORDER BY id DESC LIMIT ?"
+            params = (int(limit),)
+        with self._connect() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return [self._conflict_from_row(row) for row in rows]
+
+    @staticmethod
+    def _conflict_from_row(row):
+        return {
+            "id": int(row["id"]),
+            "batch_id": row["batch_id"],
+            "item_index": int(row["item_index"]),
+            "entity_id": row["entity_id"],
+            "op": row["op"],
+            "reason": row["reason"],
+            "payload": json.loads(row["payload"]),
+            "status": row["status"],
+            "created_at": row["created_at"],
+            "resolved_at": row["resolved_at"],
+        }
+
+    def list_changes(self, after_id=0, limit=200):
+        """Incremental change feed; audit ids act as the monotonic cursor."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT a.id, a.entity_id, a.actor_id, a.actor_role, a.action, "
+                "       a.from_status, a.to_status, a.detail, a.created_at, "
+                "       e.kind, e.status AS entity_status, e.version, e.data "
+                "FROM audit_log a LEFT JOIN entities e ON e.id = a.entity_id "
+                "WHERE a.id > ? ORDER BY a.id LIMIT ?",
+                (int(after_id), int(limit)),
+            ).fetchall()
+        changes = []
+        for row in rows:
+            changes.append(
+                {
+                    "id": int(row["id"]),
+                    "entity_id": row["entity_id"],
+                    "kind": row["kind"],
+                    "action": row["action"],
+                    "from_status": row["from_status"],
+                    "to_status": row["to_status"],
+                    "actor_id": row["actor_id"],
+                    "actor_role": row["actor_role"],
+                    "version": int(row["version"]) if row["version"] is not None else None,
+                    "entity_status": row["entity_status"],
+                    "data": json.loads(row["data"]) if row["data"] is not None else None,
+                    "detail": json.loads(row["detail"]),
+                    "created_at": row["created_at"],
+                }
+            )
+        return changes
+
+    def max_audit_id(self):
+        with self._connect() as connection:
+            row = connection.execute("SELECT COALESCE(MAX(id), 0) AS m FROM audit_log").fetchone()
+        return int(row["m"])
 
     def ping(self):
         with self._connect() as connection:
